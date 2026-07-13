@@ -33,9 +33,15 @@ jobs:
           EOF
           echo -e "\033[32m[INFO] ✅ sing-box 配置已生成\033[0m"
           
-          # 清理冲突进程并在后台静默启动
+          # 清理冲突进程
           sudo killall sing-box xray 2>/dev/null || true
+          
+          # ==================== 核心修复点 ====================
+          # 开启兼容旧版 DNS 格式的环境变量，防止新版 sing-box 报错闪退
+          export ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
           nohup sing-box run -c /tmp/config.json > /tmp/sing-box.log 2>&1 &
+          # ===================================================
+          
           sleep 3
           echo "🟢 sing-box 代理引擎后台启动完毕！"
 
