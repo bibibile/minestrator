@@ -11,49 +11,68 @@ jobs:
     steps:
       - name: "[1/5] Print Alert Info"
         run: |
-          echo "⚠️ 接收到 Uptime Kuma 宕机报警！准备启动 VLESS 代理隧道..."
-          echo "受影响服务器 ID: ${{ github.event.client_payload.server_id }}"
+          echo "⚠️ 接收到 Uptime Kuma 宕机报警或手动触发！准备启动 VLESS 代理隧道..."
+          echo "受影响服务器 ID: ${{ github.event.client_payload.server_id || '464225' }}"
 
-      - name: "[2/5] Init Xray-core Engine"
+      - name: "[2/5] Init Sing-box Proxy Engine"
         run: |
-          echo "🚀 正在下载并初始化最新版 Xray-core..."
-          wget -q -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-          mkdir ./xray-bin && unzip -q xray.zip -d ./xray-bin
-          chmod +x ./xray-bin/xray
+          echo -e "\033[36m[INFO]\033[0m 获取 sing-box 最新稳定版本..."
+          # 从官方 GitHub 仓库直接拉取原生内核，绝对不走未知第三方脚本
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d '"' -f 4)
+          wget -qO sing-box.tar.gz "$LATEST_URL"
+          tar -xzf sing-box.tar.gz
+          BIN_PATH=$(find . -maxdepth 2 -type f -name "sing-box" | head -n 1)
+          chmod +x "$BIN_PATH" && sudo mv "$BIN_PATH" /usr/local/bin/sing-box
           
-          cat << 'EOF' > ./xray-bin/config.json
+          echo -e "\033[36m[INFO]\033[0m 最新稳定版本: \033[1m$(sing-box version | head -n 1 | awk '{print $3}')\033[0m"
+          echo -e "\033[36m[INFO]\033[0m 协议: \033[1mvless\033[0m"
+          
+          # 读取 GitHub Secrets 中的 VLESS JSON 配置
+          cat << 'EOF' > /tmp/config.json
           ${{ secrets.VLESS_CONFIG_JSON }}
           EOF
+          echo -e "\033[32m[INFO] ✅ sing-box 配置已生成\033[0m"
           
-          nohup ./xray-bin/xray run -c ./xray-bin/config.json > /tmp/xray.log 2>&1 &
+          # 清理冲突进程并在后台静默启动
+          sudo killall sing-box xray 2>/dev/null || true
+          nohup sing-box run -c /tmp/config.json > /tmp/sing-box.log 2>&1 &
           sleep 3
-          echo "🟢 Xray 代理引擎后台启动完毕！"
+          echo "🟢 sing-box 代理引擎后台启动完毕！"
 
       - name: "[3/5] Test VLESS Proxy IP"
         run: |
           echo "🔍 正在测试本地 HTTP 代理 (127.0.0.1:10809) 是否能够正常出国..."
-          PROXY_IP=$(curl -s --max-time 10 -x http://127.0.0.1:10809 https://ifconfig.me)
+          # 加上 || true 防止请求超时直接导致脚本中断，确保排错日志输出
+          PROXY_IP=$(curl -s --max-time 10 -x http://127.0.0.1:10809 https://ifconfig.me || true)
+          
+          # 如果 HTTP 端口未响应，智能回退尝试 SOCKS5 10808 端口
+          if [ -z "$PROXY_IP" ]; then
+            echo "ℹ️ HTTP (10809) 代理未响应，正在尝试 SOCKS5 (10808) 端口..."
+            PROXY_IP=$(curl -s --max-time 10 -x socks5://127.0.0.1:10808 https://ifconfig.me || true)
+          fi
           
           if [ -z "$PROXY_IP" ]; then
-            echo "❌ 代理连接失败！打印 Xray 运行日志以供排查："
-            cat /tmp/xray.log
+            echo -e "\033[31m[ERROR] ❌ 代理连接彻底失败！打印 sing-box 运行日志：\033[0m"
+            cat /tmp/sing-box.log
             exit 1
           else
-            echo "🎉 代理连接成功！当前 VLESS 节点出口 IP 为: $PROXY_IP"
+            echo -e "\033[32m[INFO] 🎉 代理连接成功！当前 VLESS 节点出口 IP 为: $PROXY_IP\033[0m"
           fi
 
-      - name: "[4/5] Check Server Realtime Status"
+      - name: "[4/5] Check Server Realtime Status (Prevent False Alarm)"
         run: |
           echo "🔍 正在向后台 API 查询服务器实时运行状态..."
           
+          # 优先尝试 http 代理，如果需要也可改为 socks5
           STATUS_RESPONSE=$(curl -s --max-time 15 \
             -x http://127.0.0.1:10809 \
-            -X GET "https://mine.sttr.io/server/${{ github.event.client_payload.server_id }}" \
+            -X GET "https://mine.sttr.io/server/${{ github.event.client_payload.server_id || '464225' }}" \
             -H "Authorization: Bearer ${{ secrets.MINE_BEARER_TOKEN }}" \
-            -H "Content-Type: application/json")
+            -H "Content-Type: application/json" || true)
             
           echo "API 返回状态片段: $(echo $STATUS_RESPONSE | cut -c 1-150)..."
           
+          # 核心防误触：如果服务器当前是 running / online 状态，说明只断了反代隧道，停止发包
           if echo "$STATUS_RESPONSE" | grep -iE '"status":\s*"(started|running|online)"|"can_stop":\s*true' > /dev/null; then
             echo "🛑 【拦截生效】API 显示服务器当前处于可 Stop / 在线运行状态！"
             echo "ℹ️ 诊断结果：仅仅是外网反代/隧道链接失联，服务端主进程完好。"
@@ -69,10 +88,10 @@ jobs:
           RESPONSE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             --max-time 15 \
             -x http://127.0.0.1:10809 \
-            -X POST "https://mine.sttr.io/server/${{ github.event.client_payload.server_id }}/restart" \
+            -X POST "https://mine.sttr.io/server/${{ github.event.client_payload.server_id || '464225' }}/restart" \
             -H "Authorization: Bearer ${{ secrets.MINE_BEARER_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"action": "restart"}')
+            -d '{"action": "restart"}' || true)
             
           echo "收到目标服务器返回状态码: $RESPONSE_CODE"
           
