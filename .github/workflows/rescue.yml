@@ -1,0 +1,71 @@
+name: 🚨 Minestrator 自启服务
+
+on:
+  repository_dispatch:
+    types: [server-offline]
+  workflow_dispatch: # 方便您在后台手动点击测试
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: [1/4] 打印故障报警信息
+        run: |
+          echo "⚠️ 接收到 Uptime Kuma 宕机报警！准备启动 VLESS 代理隧道..."
+          echo "受影响服务器 ID: ${{ github.event.client_payload.server_id }}"
+
+      - name: [2/4] 启动 VLESS (Xray-core) 代理内核
+        run: |
+          echo "🚀 正在下载并初始化最新版 Xray-core..."
+          # 下载官方最新 Linux 64位 Xray 内核
+          wget -q -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          mkdir ./xray-bin && unzip -q xray.zip -d ./xray-bin
+          chmod +x ./xray-bin/xray
+          
+          # 将 GitHub Secrets 中的 VLESS JSON 配置写入本地文件
+          cat << 'EOF' > ./xray-bin/config.json
+          ${{ secrets.VLESS_CONFIG_JSON }}
+          EOF
+          
+          # 在后台静默启动 Xray 引擎
+          nohup ./xray-bin/xray run -c ./xray-bin/config.json > /tmp/xray.log 2>&1 &
+          
+          # 等待 3 秒确保底层加密握手完成
+          sleep 3
+          echo "🟢 Xray 代理引擎后台启动完毕！"
+
+      - name: [3/4] 验证 VLESS 节点连通性与 IP 归属地
+        run: |
+          echo "🔍 正在测试本地 HTTP 代理 (127.0.0.1:10809) 是否能够正常出国..."
+          # 使用 -x http://127.0.0.1:10809 检查当前出口 IP
+          PROXY_IP=$(curl -s --max-time 10 -x http://127.0.0.1:10809 https://ifconfig.me)
+          
+          if [ -z "$PROXY_IP" ]; then
+            echo "❌ 代理连接失败！打印 Xray 运行日志以供排查："
+            cat /tmp/xray.log
+            exit 1
+          else
+            echo "🎉 代理连接成功！当前 VLESS 节点出口 IP 为: $PROXY_IP"
+          fi
+
+      - name: [4/4] 通过 VLESS 隧道发送 API 强制重启指令
+        run: |
+          echo "🔄 正在通过 VLESS 节点向 Minestrator 核心服务器 (mine.sttr.io) 发包..."
+          
+          # 核心：通过 -x http://127.0.0.1:10809 挂载本地 Xray 转发服务
+          RESPONSE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 15 \
+            -x http://127.0.0.1:10809 \
+            -X POST "https://mine.sttr.io/server/${{ github.event.client_payload.server_id }}/restart" \
+            -H "Authorization: Bearer RlJhSTEzMmw0QVNJf8kc4c281NENmdVBZdzdKNWVuUEg=" \
+            -H "Content-Type: application/json" \
+            -d '{"action": "restart"}')
+            
+          echo "收到目标服务器返回状态码: $RESPONSE_CODE"
+          
+          if [ "$RESPONSE_CODE" -eq 200 ] || [ "$RESPONSE_CODE" -eq 201 ] || [ "$RESPONSE_CODE" -eq 204 ]; then
+            echo "🎉 ✅ 重启指令已通过 VLESS 节点成功发出！云端自救完成。"
+          else
+            echo "❌ 失败：服务器返回异常状态码 $RESPONSE_CODE"
+            exit 1
+          fi
