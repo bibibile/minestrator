@@ -1,9 +1,9 @@
-name: 🚨 Minestrator 自启服务
+name: 🚨 Minestrator自启服务
 
 on:
   repository_dispatch:
     types: [server-offline]
-  workflow_dispatch: # 方便您在后台手动点击测试
+  workflow_dispatch: # 开启手动点击测试按钮
 
 jobs:
   rescue:
@@ -52,12 +52,12 @@ jobs:
         run: |
           echo "🔄 正在通过 VLESS 节点向 Minestrator 核心服务器 (mine.sttr.io) 发包..."
           
-          # 核心：通过 -x http://127.0.0.1:10809 挂载本地 Xray 转发服务
+          # 核心：挂载代理，并使用安全环境变量引用 Token
           RESPONSE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             --max-time 15 \
             -x http://127.0.0.1:10809 \
             -X POST "https://mine.sttr.io/server/${{ github.event.client_payload.server_id }}/restart" \
-            -H "Authorization: Bearer RlJhSTEzMmw0QVNJf8kc4c281NENmdVBZdzdKNWVuUEg=" \
+            -H "Authorization: Bearer ${{ secrets.MINE_BEARER_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{"action": "restart"}')
             
