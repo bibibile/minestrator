@@ -1,43 +1,37 @@
-name: 🚨 Minestrator自启服务
+name: "Minestrator VLESS Auto Rescue"
 
 on:
   repository_dispatch:
     types: [server-offline]
-  workflow_dispatch: # 开启手动点击测试按钮
+  workflow_dispatch:
 
 jobs:
   rescue:
     runs-on: ubuntu-latest
     steps:
-      - name: [1/4] 打印故障报警信息
+      - name: "[1/5] Print Alert Info"
         run: |
           echo "⚠️ 接收到 Uptime Kuma 宕机报警！准备启动 VLESS 代理隧道..."
           echo "受影响服务器 ID: ${{ github.event.client_payload.server_id }}"
 
-      - name: [2/4] 启动 VLESS (Xray-core) 代理内核
+      - name: "[2/5] Init Xray-core Engine"
         run: |
           echo "🚀 正在下载并初始化最新版 Xray-core..."
-          # 下载官方最新 Linux 64位 Xray 内核
           wget -q -O xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           mkdir ./xray-bin && unzip -q xray.zip -d ./xray-bin
           chmod +x ./xray-bin/xray
           
-          # 将 GitHub Secrets 中的 VLESS JSON 配置写入本地文件
           cat << 'EOF' > ./xray-bin/config.json
           ${{ secrets.VLESS_CONFIG_JSON }}
           EOF
           
-          # 在后台静默启动 Xray 引擎
           nohup ./xray-bin/xray run -c ./xray-bin/config.json > /tmp/xray.log 2>&1 &
-          
-          # 等待 3 秒确保底层加密握手完成
           sleep 3
           echo "🟢 Xray 代理引擎后台启动完毕！"
 
-      - name: [3/4] 验证 VLESS 节点连通性与 IP 归属地
+      - name: "[3/5] Test VLESS Proxy IP"
         run: |
           echo "🔍 正在测试本地 HTTP 代理 (127.0.0.1:10809) 是否能够正常出国..."
-          # 使用 -x http://127.0.0.1:10809 检查当前出口 IP
           PROXY_IP=$(curl -s --max-time 10 -x http://127.0.0.1:10809 https://ifconfig.me)
           
           if [ -z "$PROXY_IP" ]; then
@@ -48,11 +42,30 @@ jobs:
             echo "🎉 代理连接成功！当前 VLESS 节点出口 IP 为: $PROXY_IP"
           fi
 
-      - name: [4/4] 通过 VLESS 隧道发送 API 强制重启指令
+      - name: "[4/5] Check Server Realtime Status"
         run: |
-          echo "🔄 正在通过 VLESS 节点向 Minestrator 核心服务器 (mine.sttr.io) 发包..."
+          echo "🔍 正在向后台 API 查询服务器实时运行状态..."
           
-          # 核心：挂载代理，并使用安全环境变量引用 Token
+          STATUS_RESPONSE=$(curl -s --max-time 15 \
+            -x http://127.0.0.1:10809 \
+            -X GET "https://mine.sttr.io/server/${{ github.event.client_payload.server_id }}" \
+            -H "Authorization: Bearer ${{ secrets.MINE_BEARER_TOKEN }}" \
+            -H "Content-Type: application/json")
+            
+          echo "API 返回状态片段: $(echo $STATUS_RESPONSE | cut -c 1-150)..."
+          
+          if echo "$STATUS_RESPONSE" | grep -iE '"status":\s*"(started|running|online)"|"can_stop":\s*true' > /dev/null; then
+            echo "🛑 【拦截生效】API 显示服务器当前处于可 Stop / 在线运行状态！"
+            echo "ℹ️ 诊断结果：仅仅是外网反代/隧道链接失联，服务端主进程完好。"
+            echo "🛡️ 为避免误伤在线玩家，脚本主动放弃发送 restart 指令，安全退出！"
+            exit 0
+          fi
+          echo "⚠️ 确认服务器本体已离线/休眠，准备进入发包重启流程！"
+
+      - name: "[5/5] Send Restart Command via VLESS"
+        run: |
+          echo "🔄 正在通过 VLESS 节点向 Minestrator 核心服务器 (mine.sttr.io) 发送重启命令..."
+          
           RESPONSE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             --max-time 15 \
             -x http://127.0.0.1:10809 \
