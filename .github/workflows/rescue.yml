@@ -14,39 +14,29 @@ jobs:
           echo "⚠️ 接收到 Uptime Kuma 宕机报警或手动触发！准备启动 VLESS 代理隧道..."
           echo "受影响服务器 ID: ${{ github.event.client_payload.server_id || '464225' }}"
 
-      - name: "[2/5] Init Sing-box Proxy Engine"
+      - name: "[2/5] Init Xray-core Proxy Engine"
         run: |
-          echo -e "\033[36m[INFO]\033[0m 获取 sing-box 最新稳定版本..."
-          # 从官方 GitHub 仓库直接拉取原生内核，绝对不走未知第三方脚本
-          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d '"' -f 4)
-          wget -qO sing-box.tar.gz "$LATEST_URL"
-          tar -xzf sing-box.tar.gz
-          BIN_PATH=$(find . -maxdepth 2 -type f -name "sing-box" | head -n 1)
-          chmod +x "$BIN_PATH" && sudo mv "$BIN_PATH" /usr/local/bin/sing-box
+          echo -e "\033[36m[INFO]\033[0m 获取 Xray-core 最新原生稳定稳定内核..."
+          # 1. 直接从官方拉取最新 Xray-core，100% 完美兼容您导出的 VLESS_CONFIG_JSON
+          LATEST_URL=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep "browser_download_url.*Xray-linux-64.zip" | cut -d '"' -f 4)
+          wget -qO xray.zip "$LATEST_URL"
+          unzip -q xray.zip -d ./xray-bin
+          chmod +x ./xray-bin/xray && sudo mv ./xray-bin/xray /usr/local/bin/xray
           
-          echo -e "\033[36m[INFO]\033[0m 最新稳定版本: \033[1m$(sing-box version | head -n 1 | awk '{print $3}')\033[0m"
-          echo -e "\033[36m[INFO]\033[0m 协议: \033[1mvless\033[0m"
+          echo -e "\033[36m[INFO]\033[0m 内核版本: \033[1m$(xray version | head -n 1)\033[0m"
+          echo -e "\033[36m[INFO]\033[0m 协议: \033[1mvless (Xray 原生格式)\033[0m"
           
-          # 1. 先将 GitHub Secrets 中的原始 JSON 写入临时文件
-          cat << 'EOF' > /tmp/config_raw.json
+          # 2. 原封不动地写入您的配置，无需任何 jq 删改或兼容环境变量！
+          cat << 'EOF' > /tmp/config.json
           ${{ secrets.VLESS_CONFIG_JSON }}
           EOF
+          echo -e "\033[32m[INFO] ✅ 配置文件已生成\033[0m"
           
-          # ==================== 核心自动清洗点 ====================
-          # 2. 使用 jq 自动剔除不兼容的 "log" 字段（解决 loglevel 报错），生成标准合法配置
-          jq 'del(.log)' /tmp/config_raw.json > /tmp/config.json
-          echo -e "\033[32m[INFO] ✅ sing-box 配置已清洗并生成\033[0m"
-          # ===================================================
-          
-          # 清理旧进程
+          # 3. 清理旧进程并在后台启动 Xray
           sudo killall sing-box xray 2>/dev/null || true
-          
-          # 3. 开启兼容旧版 DNS 格式的环境变量
-          export ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
-          nohup sing-box run -c /tmp/config.json > /tmp/sing-box.log 2>&1 &
-          
+          nohup xray run -c /tmp/config.json > /tmp/xray.log 2>&1 &
           sleep 3
-          echo "🟢 sing-box 代理引擎后台启动完毕！"
+          echo "🟢 Xray 代理引擎后台启动完毕！"
 
       - name: "[3/5] Test VLESS Proxy IP"
         run: |
@@ -61,8 +51,8 @@ jobs:
           fi
           
           if [ -z "$PROXY_IP" ]; then
-            echo -e "\033[31m[ERROR] ❌ 代理连接彻底失败！打印 sing-box 运行日志：\033[0m"
-            cat /tmp/sing-box.log
+            echo -e "\033[31m[ERROR] ❌ 代理连接彻底失败！打印 Xray 运行日志：\033[0m"
+            cat /tmp/xray.log
             exit 1
           else
             echo -e "\033[32m[INFO] 🎉 代理连接成功！当前 VLESS 节点出口 IP 为: $PROXY_IP\033[0m"
